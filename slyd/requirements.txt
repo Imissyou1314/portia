@@ -2,8 +2,8 @@
 twisted==15.1.0
 service_identity==14.0.0
 requests==2.5.1
-autobahn==0.10.3
-splash==1.5
+autobahn==0.10.4
+splash==1.6
 
 # Dulwich's MySQL backend
 --allow-external=mysql-connector-python
