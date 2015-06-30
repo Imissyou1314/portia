@@ -1,7 +1,9 @@
+import json
 import re
 
 from operator import itemgetter
 from copy import deepcopy
+from urlparse import urlparse
 
 from scrapy import log
 from scrapy.http import Request, HtmlResponse, FormRequest
@@ -46,7 +48,11 @@ class IblSpider(Spider):
             instance.setup_bot(settings, spec, item_schemas, all_extractors)
             self.plugins[plugin_name] = instance
 
-        self.js_enabled = spec.get('js_enabled', False)
+        self.js_enabled = False
+        self.SPLASH_HOST = None
+        if settings.get('SPLASH_URL'):
+            self.SPLASH_HOST = urlparse(settings.get('SPLASH_URL')).hostname
+            self.js_enabled = spec.get('js_enabled', False)
         self._filter_js_urls = self._build_js_url_filter(spec)
         self.login_requests = []
         self.form_requests = []
@@ -64,8 +70,9 @@ class IblSpider(Spider):
     def _process_start_urls(self, spec):
         self.start_urls = spec.get('start_urls')
         for url in self.start_urls:
-            self._start_requests.append(Request(url, callback=self.parse,
-                                                dont_filter=True))
+            request = Request(url, callback=self.parse, dont_filter=True)
+            self._add_splash_meta(request)
+            self._start_requests.append(request)
 
     def _create_init_requests(self, spec):
         for rdata in spec:
@@ -73,6 +80,7 @@ class IblSpider(Spider):
                 request = Request(url=rdata.pop("loginurl"), meta=rdata,
                                   callback=self.parse_login_page,
                                   dont_filter=True)
+                self._add_splash_meta(request)
                 self.login_requests.append(request)
             elif rdata["type"] == "form":
                 self.form_requests.append(
@@ -159,12 +167,23 @@ class IblSpider(Spider):
 
             def _callback(spider, response):
                 for link in linkextractor.links_to_follow(response):
-                    yield Request(url=link.url, callback=spider.parse)
-            return Request(url=url, callback=_callback)
-        return Request(url=url, callback=self.parse)
+                    request = Request(url=link.url, callback=spider.parse)
+                    yield self._add_splash_meta(request)
+            request = Request(url=url, callback=_callback)
+            return self._add_splash_meta(request)
+        request = Request(url=url, callback=self.parse)
+        return self._add_splash_meta(request)
 
     def parse(self, response):
         """Main handler for all downloaded responses"""
+        request = response.request
+        if (request and request.method == 'POST' and
+                urlparse(request.url).hostname == self.SPLASH_HOST):
+            url = (json.loads(request.body).get('url'))
+            if url:
+                print('setting url for response')
+                print(url)
+                response._url = url
         content_type = response.headers.get('Content-Type', '')
         if isinstance(response, HtmlResponse):
             return self.handle_html(response)
@@ -182,14 +201,13 @@ class IblSpider(Spider):
         return self._handle_result(response, 'handle_html')
 
     def _handle_result(self, response, handler=None):
+        print(response.body_as_unicode())
         for plugin in self.plugins.values():
             _handler = getattr(plugin, handler, None)
             if _handler is None:
                 continue
             for item_or_request in _handler(response, set()):
-                if (self.js_enabled and
-                        isinstance(item_or_request, Request) and
-                        self._filter_js_urls(item_or_request.url)):
+                if isinstance(item_or_request, Request):
                     item_or_request = self._add_splash_meta(item_or_request)
 
                 yield item_or_request
@@ -218,11 +236,16 @@ class IblSpider(Spider):
         return filterf if filterf else lambda x: x
 
     def _add_splash_meta(self, request):
-        request.meta['splash'] = {
-            'endpoint': 'render.html',
-            'args': {
-                'wait': 1,
-                'images': 0,
+        if self.js_enabled and self._filter_js_urls(request.url):
+            cleaned_url = urlparse(request.url)._replace(params='', query='',
+                                                         fragment='').geturl()
+            request.meta['splash'] = {
+                'endpoint': 'render.html',
+                'args': {
+                    'wait': 5,
+                    'images': 0,
+                    'url': request.url,
+                    'baseurl': cleaned_url
+                }
             }
-        }
         return request
